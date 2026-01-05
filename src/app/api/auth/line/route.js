@@ -9,6 +9,8 @@ export async function POST(request) {
     const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
     const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 
+    console.log('LINE Auth API called with code:', code?.substring(0, 10) + '...')
+
     try {
         // 1. Get LINE Access Token
         const tokenResponse = await fetch('https://api.line.me/oauth2/v2.1/token', {
@@ -23,6 +25,8 @@ export async function POST(request) {
             }),
         })
         const tokens = await tokenResponse.json()
+        console.log('LINE token response:', tokens.error || 'success')
+
         if (!tokens.access_token) {
             throw new Error('Failed to get access token: ' + JSON.stringify(tokens))
         }
@@ -32,6 +36,8 @@ export async function POST(request) {
             headers: { Authorization: `Bearer ${tokens.access_token}` },
         })
         const profile = await profileResponse.json()
+        console.log('LINE profile:', profile.displayName)
+
         if (!profile.userId) {
             throw new Error('Failed to get profile')
         }
@@ -43,6 +49,7 @@ export async function POST(request) {
         // Check/Create user
         const { data: { users } } = await supabaseAdmin.auth.admin.listUsers()
         let user = users.find(u => u.email === dummyEmail)
+        console.log('Existing user found:', !!user)
 
         if (!user) {
             const { data: newUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
@@ -50,23 +57,33 @@ export async function POST(request) {
                 email_confirm: true,
                 user_metadata: { name: profile.displayName, avatar_url: profile.pictureUrl }
             })
-            if (createError) throw createError
+            if (createError) {
+                console.error('Create user error:', createError)
+                throw createError
+            }
             user = newUser.user
+            console.log('New user created:', user.id)
         } else {
             await supabaseAdmin.auth.admin.updateUserById(user.id, {
                 user_metadata: { name: profile.displayName, avatar_url: profile.pictureUrl }
             })
+            console.log('User metadata updated')
         }
 
-        // 4. Generate Session Link
-        const baseUrl = redirectUri.split('/auth/callback')[0]
+        // 4. Generate Session Link - redirect to /auth/callback to handle the tokens
+        const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://horenso.hitokoto.tech'
         const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
             type: 'magiclink',
             email: dummyEmail,
-            options: { redirectTo: baseUrl }
+            options: { redirectTo: `${siteUrl}/auth/callback` }
         })
-        if (linkError) throw linkError
 
+        if (linkError) {
+            console.error('Generate link error:', linkError)
+            throw linkError
+        }
+
+        console.log('Magic link generated successfully')
         return NextResponse.json({ session_link: linkData.properties.action_link })
     } catch (err) {
         console.error("LINE Auth API Error:", err)
