@@ -44,9 +44,9 @@ function LineCallbackContent() {
                 console.log('API response:', { ok: response.ok, hasSession: !!data.session })
 
                 if (!response.ok) {
-                    console.error('API error:', data)
-                    setError(data.error || 'ログインに失敗しました')
-                    setTimeout(() => router.push('/'), 3000)
+                    console.error('API error details:', JSON.stringify(data, null, 2))
+                    setError(data.details || data.error || 'ログインに失敗しました')
+                    setTimeout(() => router.push('/'), 10000) // 10秒表示
                     return
                 }
 

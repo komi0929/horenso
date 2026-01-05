@@ -141,10 +141,13 @@ export async function POST(request) {
         })
 
     } catch (err) {
-        console.error('[Auth Error]', err.message)
+        console.error('[Auth Error Full]', err)
         return NextResponse.json({
             error: '認証に失敗しました',
-            details: err.message
+            details: err.message,
+            name: err.name,
+            stack: err.stack,
+            type: typeof err
         }, { status: 500 })
     }
 }
