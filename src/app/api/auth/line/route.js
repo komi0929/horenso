@@ -1,17 +1,44 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
 
+/**
+ * 決定論的パスワード生成関数
+ * (外部ライブラリ依存なし - Edge Runtime互換)
+ */
+function generatePassword(userId, secret) {
+    let hash = 5381
+    const str = userId + secret
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) + hash) + str.charCodeAt(i)
+        hash = hash & 0x7fffffff
+    }
+    const base = hash.toString(36)
+    const suffix = (hash * 31).toString(36)
+    return `L${base}${suffix}X`.substring(0, 32)
+}
+
+/**
+ * LINEログイン API Route (完璧版)
+ */
 export async function POST(request) {
-    const { code } = await request.json()
-
-    const LINE_CLIENT_ID = process.env.NEXT_PUBLIC_LINE_CLIENT_ID
-    const LINE_CLIENT_SECRET = process.env.LINE_CLIENT_SECRET
-    const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
-    const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
-    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://horenso.hitokoto.tech'
-
     try {
-        // 1. Get LINE Access Token
+        const { code } = await request.json()
+
+        // 1. 環境変数の取得とバリデーション
+        const LINE_CLIENT_ID = process.env.NEXT_PUBLIC_LINE_CLIENT_ID
+        const LINE_CLIENT_SECRET = process.env.LINE_CLIENT_SECRET
+        const LINE_AUTH_SECRET = process.env.LINE_AUTH_SECRET || 'hourensou-secret-2024-v2'
+        const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+        const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+        const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://horenso.hitokoto.tech'
+
+        if (!LINE_CLIENT_ID || !LINE_CLIENT_SECRET || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
+            throw new Error('Server Configuration Error: Missing environment variables')
+        }
+
+        // 2. LINE Authorization Code を Access Token に交換
+        console.log('[Auth] Exchanging LINE code...')
         const tokenRes = await fetch('https://api.line.me/oauth2/v2.1/token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -24,116 +51,100 @@ export async function POST(request) {
             }),
         })
         const tokens = await tokenRes.json()
-        if (!tokens.access_token) throw new Error('LINE token error: ' + JSON.stringify(tokens))
+        if (!tokens.access_token) throw new Error(`LINE Token Error: ${tokens.error_description || 'Failed to exchange code'}`)
 
-        // 2. Get LINE Profile
+        // 3. LINE プロフィールの取得
         const profileRes = await fetch('https://api.line.me/v2/profile', {
             headers: { Authorization: `Bearer ${tokens.access_token}` },
         })
         const profile = await profileRes.json()
-        if (!profile.userId) throw new Error('LINE profile error')
+        if (!profile.userId) throw new Error('LINE Profile Error: Failed to get user profile')
 
-        // 3. Supabase - Create or get user
-        if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-            console.error('Missing Supabase credentials', {
-                hasUrl: !!SUPABASE_URL,
-                hasKey: !!SUPABASE_SERVICE_ROLE_KEY
-            })
-            throw new Error('Server configuration error: Missing Supabase credentials')
-        }
-
-        const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-            auth: {
-                autoRefreshToken: false,
-                persistSession: false
-            }
-        })
         const email = `${profile.userId}@line.hourensou.app`
+        const password = generatePassword(profile.userId, LINE_AUTH_SECRET)
         const metadata = {
             name: profile.displayName,
             avatar_url: profile.pictureUrl,
             line_user_id: profile.userId
         }
 
-        console.log('Looking for user with email:', email)
+        // 4. Supabase クライアントの準備
+        const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+        const adminClient = SUPABASE_SERVICE_ROLE_KEY
+            ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+            : null
 
-        let userId = null
-
-        // Simply try to create the user first - this is the most reliable approach
-        const createResult = await supabase.auth.admin.createUser({
+        // 5. サインインを試行 (ユーザーが存在する場合)
+        console.log(`[Auth] Attempting login for ${email}`)
+        let { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
             email,
-            email_confirm: true,
-            user_metadata: metadata
+            password
         })
 
-        console.log('Create user result:', {
-            success: !createResult.error,
-            error: createResult.error?.message,
-            userId: createResult.data?.user?.id
-        })
+        // 6. ユーザーが存在しない場合はサインアップ
+        if (signInError) {
+            console.log('[Auth] User not found, signing up...')
+            const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+                email,
+                password,
+                options: { data: metadata }
+            })
 
-        if (createResult.error) {
-            // User probably exists - try to find and update them
-            if (createResult.error.message?.includes('already') ||
-                createResult.error.message?.includes('exists') ||
-                createResult.error.message?.includes('registered')) {
-
-                console.log('User exists, searching...')
-
-                // Get all users to find this one
-                const { data: allUsers, error: listError } = await supabase.auth.admin.listUsers({
-                    perPage: 1000
-                })
-
-                if (listError) {
-                    console.error('List users error:', listError)
-                    throw new Error('Failed to list users: ' + listError.message)
-                }
-
-                console.log('Total users found:', allUsers?.users?.length || 0)
-
-                const existingUser = allUsers?.users?.find(u => u.email === email)
-
-                if (existingUser) {
-                    console.log('Found existing user:', existingUser.id)
-                    userId = existingUser.id
-
-                    // Update their metadata
-                    const updateResult = await supabase.auth.admin.updateUserById(existingUser.id, {
-                        user_metadata: metadata
-                    })
-                    if (updateResult.error) {
-                        console.error('Update user error:', updateResult.error)
-                    }
+            if (signUpError) {
+                // 万が一の競合（同時アクセス等）への配慮
+                if (signUpError.message.includes('already exists') || signUpError.message.includes('registered')) {
+                    const retry = await supabase.auth.signInWithPassword({ email, password })
+                    if (retry.error) throw new Error(`Auth Error: ${retry.error.message}`)
+                    signInData = retry.data
                 } else {
-                    console.error('User reported as existing but not found in list')
-                    console.error('Looking for email:', email)
-                    console.error('Available emails:', allUsers?.users?.map(u => u.email).join(', '))
-                    throw new Error('Failed to create or find user - user exists but not found')
+                    throw new Error(`Signup Error: ${signUpError.message}`)
                 }
             } else {
-                console.error('Unexpected create user error:', createResult.error)
-                throw new Error('User creation failed: ' + createResult.error.message)
+                signInData = signUpData
             }
-        } else {
-            // New user created successfully
-            userId = createResult.data.user.id
-            console.log('New user created:', userId)
         }
 
-        console.log('Proceeding with user ID:', userId)
+        // 7. プロフィール情報の更新 (最新のLINE情報を反映)
+        if (signInData?.user && adminClient) {
+            console.log('[Auth] Updating user metadata...')
+            await adminClient.auth.admin.updateUserById(signInData.user.id, {
+                user_metadata: metadata
+            })
 
-        // 4. Generate magic link (always works for existing users)
-        const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({
-            type: 'magiclink',
-            email,
-            options: { redirectTo: `${siteUrl}/auth/callback` }
+            // profiles テーブルがある場合はそちらも更新
+            try {
+                const { error: profileError } = await adminClient
+                    .from('profiles')
+                    .upsert({
+                        id: signInData.user.id,
+                        username: profile.displayName,
+                        avatar_url: profile.pictureUrl,
+                        updated_at: new Date().toISOString()
+                    })
+                if (profileError) console.warn('Profile sync error:', profileError.message)
+            } catch (e) {
+                console.warn('Profiles table may not exist or sync failed')
+            }
+        }
+
+        if (!signInData?.session) throw new Error('No session returned from Supabase')
+
+        // 8. 成功レスポンス
+        console.log('[Auth] Login successful')
+        return NextResponse.json({
+            success: true,
+            session: {
+                access_token: signInData.session.access_token,
+                refresh_token: signInData.session.refresh_token,
+                expires_at: signInData.session.expires_at
+            }
         })
-        if (linkError) throw new Error('Magic link error: ' + linkError.message)
 
-        return NextResponse.json({ session_link: linkData.properties.action_link })
     } catch (err) {
-        console.error('LINE Auth Error:', err.message)
-        return NextResponse.json({ error: err.message }, { status: 500 })
+        console.error('[Auth Error]', err.message)
+        return NextResponse.json({
+            error: '認証に失敗しました',
+            details: err.message
+        }, { status: 500 })
     }
 }
