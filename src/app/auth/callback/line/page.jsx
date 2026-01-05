@@ -1,9 +1,10 @@
 'use client'
 
+import { Suspense } from 'react'
 import { useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 
-export default function LineCallbackPage() {
+function LineCallbackContent() {
     const router = useRouter()
     const searchParams = useSearchParams()
 
@@ -49,5 +50,18 @@ export default function LineCallbackPage() {
             <div className="w-12 h-12 border-4 border-[#06C755] border-t-transparent rounded-full animate-spin mb-4"></div>
             <p className="text-gray-500 font-bold">LINEでログイン中...</p>
         </div>
+    )
+}
+
+export default function LineCallbackPage() {
+    return (
+        <Suspense fallback={
+            <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50">
+                <div className="w-12 h-12 border-4 border-[#06C755] border-t-transparent rounded-full animate-spin mb-4"></div>
+                <p className="text-gray-500 font-bold">読み込み中...</p>
+            </div>
+        }>
+            <LineCallbackContent />
+        </Suspense>
     )
 }
