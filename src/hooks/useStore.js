@@ -1,7 +1,16 @@
 'use client'
 
 import { create } from 'zustand'
-import { supabase } from '@/lib/supabase'
+
+// Lazy import supabase to avoid build-time errors
+let supabaseClient = null
+const getSupabaseClient = async () => {
+    if (!supabaseClient) {
+        const { supabase } = await import('@/lib/supabase')
+        supabaseClient = supabase
+    }
+    return supabaseClient
+}
 
 export const useStore = create((set, get) => ({
     user: null,
@@ -13,6 +22,9 @@ export const useStore = create((set, get) => ({
 
     // Auth Initialization
     initAuth: async () => {
+        const supabase = await getSupabaseClient()
+        if (!supabase) return
+
         const { data: { session } } = await supabase.auth.getSession()
         if (session?.user) {
             const { data: profile } = await supabase.from('profiles').select('*').eq('id', session.user.id).single()
@@ -32,12 +44,17 @@ export const useStore = create((set, get) => ({
     },
 
     logout: async () => {
+        const supabase = await getSupabaseClient()
+        if (!supabase) return
         await supabase.auth.signOut()
         set({ user: null, notes: [] })
     },
 
     // Data Fetching
     fetchNotes: async () => {
+        const supabase = await getSupabaseClient()
+        if (!supabase) return
+
         const { data, error } = await supabase
             .from('notes')
             .select(`*, profiles ( username, avatar_url )`)
@@ -62,6 +79,9 @@ export const useStore = create((set, get) => ({
     },
 
     addNote: async (note) => {
+        const supabase = await getSupabaseClient()
+        if (!supabase) return
+
         let imageUrl = null
         if (note.image && note.image.startsWith('data:')) {
             const fileExt = 'png'
@@ -92,6 +112,9 @@ export const useStore = create((set, get) => ({
     },
 
     toggleRead: async (id) => {
+        const supabase = await getSupabaseClient()
+        if (!supabase) return
+
         const currentNotes = get().notes
         const targetNote = currentNotes.find(n => n.id === id)
         const newStatus = !targetNote.isRead
@@ -110,6 +133,9 @@ export const useStore = create((set, get) => ({
     },
 
     deleteNote: async (id) => {
+        const supabase = await getSupabaseClient()
+        if (!supabase) return
+
         const currentNotes = get().notes
         set({ notes: currentNotes.filter(n => n.id !== id) })
 
