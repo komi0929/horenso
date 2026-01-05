@@ -104,15 +104,15 @@ export async function POST(request) {
             }
         }
 
-        // 7. プロフィール情報の更新 (最新のLINE情報を反映)
+        // 7. プロフィール情報の更新 (非必須のため、失敗しても無視してログイン継続)
         if (signInData?.user && adminClient) {
-            console.log('[Auth] Updating user metadata...')
-            await adminClient.auth.admin.updateUserById(signInData.user.id, {
-                user_metadata: metadata
-            })
-
-            // profiles テーブルがある場合はそちらも更新
             try {
+                console.log('[Auth] Updating user metadata...')
+                await adminClient.auth.admin.updateUserById(signInData.user.id, {
+                    user_metadata: metadata
+                })
+
+                // profiles テーブルがある場合はそちらも更新
                 const { error: profileError } = await adminClient
                     .from('profiles')
                     .upsert({
@@ -121,9 +121,9 @@ export async function POST(request) {
                         avatar_url: profile.pictureUrl,
                         updated_at: new Date().toISOString()
                     })
-                if (profileError) console.warn('Profile sync error:', profileError.message)
+                if (profileError) console.warn('[Auth] Profile sync warning:', profileError.message)
             } catch (e) {
-                console.warn('Profiles table may not exist or sync failed')
+                console.warn('[Auth] Profile sync failed (not critical):', e.message)
             }
         }
 
