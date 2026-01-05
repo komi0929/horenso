@@ -3,7 +3,6 @@ import { NextResponse } from 'next/server'
 
 /**
  * 決定論的パスワード生成関数
- * (外部ライブラリ依存なし - Edge Runtime互換)
  */
 function generatePassword(userId, secret) {
     let hash = 5381
@@ -18,26 +17,25 @@ function generatePassword(userId, secret) {
 }
 
 /**
- * LINEログイン API Route (完璧版)
+ * LINEログイン API Route (最終修正版)
  */
 export async function POST(request) {
     try {
         const { code } = await request.json()
 
-        // 1. 環境変数の取得とバリデーション
         const LINE_CLIENT_ID = process.env.NEXT_PUBLIC_LINE_CLIENT_ID
         const LINE_CLIENT_SECRET = process.env.LINE_CLIENT_SECRET
-        const LINE_AUTH_SECRET = process.env.LINE_AUTH_SECRET || 'hourensou-secret-2024-v2'
+        const LINE_AUTH_SECRET = process.env.LINE_AUTH_SECRET || 'hourensou-secret-2024-v3'
         const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
         const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
         const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
         const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://horenso.hitokoto.tech'
 
         if (!LINE_CLIENT_ID || !LINE_CLIENT_SECRET || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
-            throw new Error('Server Configuration Error: Missing environment variables')
+            throw new Error('Environment variables are not configured correctly')
         }
 
-        // 2. LINE Authorization Code を Access Token に交換
+        // 1. LINE Authorization Code を Access Token に交換
         console.log('[Auth] Exchanging LINE code...')
         const tokenRes = await fetch('https://api.line.me/oauth2/v2.1/token', {
             method: 'POST',
@@ -51,9 +49,9 @@ export async function POST(request) {
             }),
         })
         const tokens = await tokenRes.json()
-        if (!tokens.access_token) throw new Error(`LINE Token Error: ${tokens.error_description || 'Failed to exchange code'}`)
+        if (!tokens.access_token) throw new Error(`LINE Token Error: ${tokens.error_description || 'Failed'}`)
 
-        // 3. LINE プロフィールの取得
+        // 2. LINE プロフィールの取得
         const profileRes = await fetch('https://api.line.me/v2/profile', {
             headers: { Authorization: `Bearer ${tokens.access_token}` },
         })
@@ -68,68 +66,59 @@ export async function POST(request) {
             line_user_id: profile.userId
         }
 
-        // 4. Supabase クライアントの準備
+        // 3. Supabase クライアントの準備 (管理者用)
         const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
-        const adminClient = SUPABASE_SERVICE_ROLE_KEY
-            ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-            : null
+        const adminClient = SUPABASE_SERVICE_ROLE_KEY ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) : null
 
-        // 5. サインインを試行 (ユーザーが存在する場合)
-        console.log(`[Auth] Attempting login for ${email}`)
+        // 4. サインインを試行
+        console.log(`[Auth] Attempting sign-in for ${email}`)
         let { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
             email,
             password
         })
 
-        // 6. ユーザーが存在しない場合はサインアップ
+        // 5. ユーザーが存在しない場合、管理者権限で「確認済み」ユーザーを作成
         if (signInError) {
-            console.log('[Auth] User not found, signing up...')
-            const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+            console.log('[Auth] Sign-in failed (user may not exist), creating user via admin...')
+            if (!adminClient) throw new Error('SUPABASE_SERVICE_ROLE_KEY is required for first-time user creation')
+
+            const { data: adminUser, error: adminError } = await adminClient.auth.admin.createUser({
                 email,
                 password,
-                options: { data: metadata }
+                email_confirm: true, // 重要: メール確認をスキップ
+                user_metadata: metadata
             })
 
-            if (signUpError) {
-                // 万が一の競合（同時アクセス等）への配慮
-                if (signUpError.message.includes('already exists') || signUpError.message.includes('registered')) {
-                    const retry = await supabase.auth.signInWithPassword({ email, password })
-                    if (retry.error) throw new Error(`Auth Error: ${retry.error.message}`)
-                    signInData = retry.data
+            if (adminError) {
+                // 既に存在しているがログインに失敗したケース
+                if (adminError.message.includes('already exists') || adminError.message.includes('registered')) {
+                    console.log('[Auth] User already exists, retrying sign-in...')
                 } else {
-                    throw new Error(`Signup Error: ${signUpError.message}`)
+                    throw new Error(`Admin Create Error: ${adminError.message}`)
                 }
-            } else {
-                signInData = signUpData
             }
+
+            // 作成または確認後、再度サインイン
+            console.log('[Auth] Final sign-in attempt...')
+            const retry = await supabase.auth.signInWithPassword({ email, password })
+            if (retry.error) throw new Error(`Final Sign-in Error: ${retry.error.message}`)
+            signInData = retry.data
         }
 
-        // 7. プロフィール情報の更新 (非必須のため、失敗しても無視してログイン継続)
-        if (signInData?.user && adminClient) {
-            try {
-                console.log('[Auth] Updating user metadata...')
-                await adminClient.auth.admin.updateUserById(signInData.user.id, {
-                    user_metadata: metadata
-                })
+        if (!signInData?.session) throw new Error('Authentication succeeded but Supabase returned no session')
 
-                // profiles テーブルがある場合はそちらも更新
-                const { error: profileError } = await adminClient
-                    .from('profiles')
-                    .upsert({
-                        id: signInData.user.id,
-                        username: profile.displayName,
-                        avatar_url: profile.pictureUrl,
-                        updated_at: new Date().toISOString()
-                    })
-                if (profileError) console.warn('[Auth] Profile sync warning:', profileError.message)
-            } catch (e) {
-                console.warn('[Auth] Profile sync failed (not critical):', e.message)
-            }
+        // 6. プロフィール情報の非同期更新 (失敗してもログインは継続)
+        if (signInData.user && adminClient) {
+            adminClient.auth.admin.updateUserById(signInData.user.id, { user_metadata: metadata })
+                .then(() => adminClient.from('profiles').upsert({
+                    id: signInData.user.id,
+                    username: profile.displayName,
+                    avatar_url: profile.pictureUrl,
+                    updated_at: new Date().toISOString()
+                }))
+                .catch(e => console.warn('[Auth] Profile sync failed:', e.message))
         }
 
-        if (!signInData?.session) throw new Error('No session returned from Supabase')
-
-        // 8. 成功レスポンス
         console.log('[Auth] Login successful')
         return NextResponse.json({
             success: true,
@@ -145,9 +134,7 @@ export async function POST(request) {
         return NextResponse.json({
             error: '認証に失敗しました',
             details: err.message,
-            name: err.name,
-            stack: err.stack,
-            type: typeof err
+            stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
         }, { status: 500 })
     }
 }
