@@ -34,6 +34,14 @@ export async function POST(request) {
         if (!profile.userId) throw new Error('LINE profile error')
 
         // 3. Supabase - Create or get user
+        if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+            console.error('Missing Supabase credentials', {
+                hasUrl: !!SUPABASE_URL,
+                hasKey: !!SUPABASE_SERVICE_ROLE_KEY
+            })
+            throw new Error('Server configuration error: Missing Supabase credentials')
+        }
+
         const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
             auth: {
                 autoRefreshToken: false,
@@ -47,74 +55,73 @@ export async function POST(request) {
             line_user_id: profile.userId
         }
 
+        console.log('Looking for user with email:', email)
+
         let userId = null
 
-        // First, try to find existing user by email using listUsers with filter
-        const { data: existingUsers, error: listError } = await supabase.auth.admin.listUsers({
-            page: 1,
-            perPage: 1
+        // Simply try to create the user first - this is the most reliable approach
+        const createResult = await supabase.auth.admin.createUser({
+            email,
+            email_confirm: true,
+            user_metadata: metadata
         })
 
-        // Search for existing user with this email
-        let existingUser = null
-        if (existingUsers?.users) {
-            for (const user of existingUsers.users) {
-                if (user.email === email) {
-                    existingUser = user
-                    break
+        console.log('Create user result:', {
+            success: !createResult.error,
+            error: createResult.error?.message,
+            userId: createResult.data?.user?.id
+        })
+
+        if (createResult.error) {
+            // User probably exists - try to find and update them
+            if (createResult.error.message?.includes('already') ||
+                createResult.error.message?.includes('exists') ||
+                createResult.error.message?.includes('registered')) {
+
+                console.log('User exists, searching...')
+
+                // Get all users to find this one
+                const { data: allUsers, error: listError } = await supabase.auth.admin.listUsers({
+                    perPage: 1000
+                })
+
+                if (listError) {
+                    console.error('List users error:', listError)
+                    throw new Error('Failed to list users: ' + listError.message)
                 }
-            }
-        }
 
-        // If we need to search more pages, do pagination
-        if (!existingUser && existingUsers?.users?.length === 1) {
-            // Try broader search
-            const { data: allUsers } = await supabase.auth.admin.listUsers({ perPage: 1000 })
-            existingUser = allUsers?.users?.find(u => u.email === email)
-        }
+                console.log('Total users found:', allUsers?.users?.length || 0)
 
-        if (existingUser) {
-            // User exists - update metadata
-            console.log('Existing user found:', existingUser.id)
-            await supabase.auth.admin.updateUserById(existingUser.id, {
-                user_metadata: metadata
-            })
-            userId = existingUser.id
-        } else {
-            // Create new user
-            const createResult = await supabase.auth.admin.createUser({
-                email,
-                email_confirm: true,
-                user_metadata: metadata
-            })
+                const existingUser = allUsers?.users?.find(u => u.email === email)
 
-            if (createResult.error) {
-                // Double check if it's "already registered" error
-                if (createResult.error.message?.includes('already been registered') ||
-                    createResult.error.message?.includes('already exists')) {
-                    // Race condition - user was created between our check and create
-                    const { data: retryUsers } = await supabase.auth.admin.listUsers({ perPage: 1000 })
-                    const retryUser = retryUsers?.users?.find(u => u.email === email)
-                    if (retryUser) {
-                        userId = retryUser.id
-                        await supabase.auth.admin.updateUserById(retryUser.id, {
-                            user_metadata: metadata
-                        })
-                    } else {
-                        console.error('Failed to find user after creation reported as duplicate')
-                        throw new Error('Failed to create or find user')
+                if (existingUser) {
+                    console.log('Found existing user:', existingUser.id)
+                    userId = existingUser.id
+
+                    // Update their metadata
+                    const updateResult = await supabase.auth.admin.updateUserById(existingUser.id, {
+                        user_metadata: metadata
+                    })
+                    if (updateResult.error) {
+                        console.error('Update user error:', updateResult.error)
                     }
                 } else {
-                    console.error('User creation error:', createResult.error)
-                    throw new Error('User creation failed: ' + createResult.error.message)
+                    console.error('User reported as existing but not found in list')
+                    console.error('Looking for email:', email)
+                    console.error('Available emails:', allUsers?.users?.map(u => u.email).join(', '))
+                    throw new Error('Failed to create or find user - user exists but not found')
                 }
             } else {
-                userId = createResult.data.user.id
-                console.log('New user created:', userId)
+                console.error('Unexpected create user error:', createResult.error)
+                throw new Error('User creation failed: ' + createResult.error.message)
             }
+        } else {
+            // New user created successfully
+            userId = createResult.data.user.id
+            console.log('New user created:', userId)
         }
 
-        console.log('Using user ID for magic link:', userId)
+        console.log('Proceeding with user ID:', userId)
 
         // 4. Generate magic link (always works for existing users)
         const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({
