@@ -1,29 +1,34 @@
-import { Geist, Geist_Mono } from "next/font/google";
-import "./globals.css";
+'use client'
 
-const geistSans = Geist({
-    variable: "--font-geist-sans",
+import { useEffect } from 'react'
+import { useStore } from '@/hooks/useStore'
+import { Toast } from '@/components/Toast'
+import "./globals.css"
+import { Outfit, Inter } from "next/font/google"
+
+const outfit = Outfit({
     subsets: ["latin"],
-});
+    variable: "--font-heading",
+})
 
-const geistMono = Geist_Mono({
-    variable: "--font-geist-mono",
+const inter = Inter({
     subsets: ["latin"],
-});
-
-export const metadata = {
-    title: "ホウレンソウ - チーム情報共有アプリ",
-    description: "チームメンバーと簡単に情報を共有できるPWAアプリ",
-};
+    variable: "--font-body",
+})
 
 export default function RootLayout({ children }) {
+    const { initAuth } = useStore()
+
+    useEffect(() => {
+        initAuth()
+    }, [initAuth])
+
     return (
         <html lang="ja">
-            <body
-                className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-            >
+            <body className={`${outfit.variable} ${inter.variable} antialiased`}>
                 {children}
+                <Toast />
             </body>
         </html>
-    );
+    )
 }

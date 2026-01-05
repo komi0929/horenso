@@ -108,35 +108,54 @@ export const useStore = create((set, get) => ({
 
     addNote: async (note) => {
         const supabase = await getSupabaseClient()
-        if (!supabase) return
+        if (!supabase) {
+            get().showToast('通信エラーが発生しました')
+            return
+        }
+
+        const user = get().user
+        if (!user) {
+            get().showToast('ログインが必要です')
+            return
+        }
 
         let imageUrl = null
-        if (note.image && note.image.startsWith('data:')) {
-            const fileExt = 'png'
-            const fileName = `${Date.now()}.${fileExt}`
-            const { error: uploadError } = await supabase.storage
-                .from('images')
-                .upload(fileName, dataURItoBlob(note.image), { upsert: true })
+        try {
+            if (note.image && note.image.startsWith('data:')) {
+                const fileExt = 'png'
+                const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
+                const { error: uploadError } = await supabase.storage
+                    .from('images')
+                    .upload(fileName, dataURItoBlob(note.image), { upsert: true })
 
-            if (!uploadError) {
+                if (uploadError) throw uploadError
+
                 const { data: { publicUrl } } = supabase.storage.from('images').getPublicUrl(fileName)
                 imageUrl = publicUrl
             }
+
+            const { data, error } = await supabase
+                .from('notes')
+                .insert({
+                    user_id: user.id,
+                    title: note.title,
+                    content: note.content,
+                    color: note.color,
+                    image_url: imageUrl,
+                    is_read: false
+                })
+                .select()
+
+            if (error) throw error
+
+            get().showToast('投稿しました！')
+            get().fetchNotes()
+            return true
+        } catch (err) {
+            console.error('Add note failed:', err)
+            get().showToast(`失敗しました: ${err.message || '不明なエラー'}`)
+            return false
         }
-
-        const { data, error } = await supabase
-            .from('notes')
-            .insert({
-                user_id: get().user.id,
-                title: note.title,
-                content: note.content,
-                color: note.color,
-                image_url: imageUrl,
-                is_read: false
-            })
-            .select()
-
-        if (!error) get().fetchNotes()
     },
 
     toggleRead: async (id) => {
