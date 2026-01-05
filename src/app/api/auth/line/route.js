@@ -8,8 +8,9 @@ export async function POST(request) {
     const LINE_CLIENT_SECRET = process.env.LINE_CLIENT_SECRET
     const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
     const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://horenso.hitokoto.tech'
 
-    console.log('LINE Auth API called with code:', code?.substring(0, 10) + '...')
+    console.log('LINE Auth API called')
 
     try {
         // 1. Get LINE Access Token
@@ -19,13 +20,12 @@ export async function POST(request) {
             body: new URLSearchParams({
                 grant_type: 'authorization_code',
                 code,
-                redirect_uri: redirectUri,
+                redirect_uri: `${siteUrl}/auth/callback/line`,
                 client_id: LINE_CLIENT_ID,
                 client_secret: LINE_CLIENT_SECRET,
             }),
         })
         const tokens = await tokenResponse.json()
-        console.log('LINE token response:', tokens.error || 'success')
 
         if (!tokens.access_token) {
             throw new Error('Failed to get access token: ' + JSON.stringify(tokens))
@@ -36,42 +36,57 @@ export async function POST(request) {
             headers: { Authorization: `Bearer ${tokens.access_token}` },
         })
         const profile = await profileResponse.json()
-        console.log('LINE profile:', profile.displayName)
 
         if (!profile.userId) {
             throw new Error('Failed to get profile')
         }
 
+        console.log('LINE profile:', profile.displayName)
+
         // 3. Supabase Integration
         const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
         const dummyEmail = `${profile.userId}@line.hourensou.app`
 
-        // Check/Create user
-        const { data: { users } } = await supabaseAdmin.auth.admin.listUsers()
-        let user = users.find(u => u.email === dummyEmail)
-        console.log('Existing user found:', !!user)
+        // Try to create user, handle if already exists
+        let user = null
 
-        if (!user) {
+        try {
             const { data: newUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
                 email: dummyEmail,
                 email_confirm: true,
                 user_metadata: { name: profile.displayName, avatar_url: profile.pictureUrl }
             })
+
             if (createError) {
-                console.error('Create user error:', createError)
-                throw createError
+                // User probably already exists, try to find them
+                if (createError.message.includes('already been registered')) {
+                    console.log('User already exists, fetching...')
+                    const { data: { users } } = await supabaseAdmin.auth.admin.listUsers()
+                    user = users.find(u => u.email === dummyEmail)
+
+                    if (user) {
+                        // Update metadata
+                        await supabaseAdmin.auth.admin.updateUserById(user.id, {
+                            user_metadata: { name: profile.displayName, avatar_url: profile.pictureUrl }
+                        })
+                    }
+                } else {
+                    throw createError
+                }
+            } else {
+                user = newUser.user
+                console.log('New user created:', user.id)
             }
-            user = newUser.user
-            console.log('New user created:', user.id)
-        } else {
-            await supabaseAdmin.auth.admin.updateUserById(user.id, {
-                user_metadata: { name: profile.displayName, avatar_url: profile.pictureUrl }
-            })
-            console.log('User metadata updated')
+        } catch (err) {
+            console.error('User creation/fetch error:', err)
+            throw err
         }
 
-        // 4. Generate Session Link - redirect to /auth/callback to handle the tokens
-        const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://horenso.hitokoto.tech'
+        if (!user) {
+            throw new Error('Failed to create or find user')
+        }
+
+        // 4. Generate Magic Link
         const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
             type: 'magiclink',
             email: dummyEmail,
