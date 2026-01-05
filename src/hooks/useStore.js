@@ -25,6 +25,33 @@ export const useStore = create((set, get) => ({
         const supabase = await getSupabaseClient()
         if (!supabase) return
 
+        // First, check if there's a hash with tokens (from magic link)
+        if (typeof window !== 'undefined') {
+            const hash = window.location.hash
+            if (hash && hash.includes('access_token')) {
+                // Parse the hash to extract tokens
+                const params = new URLSearchParams(hash.substring(1))
+                const accessToken = params.get('access_token')
+                const refreshToken = params.get('refresh_token')
+
+                if (accessToken && refreshToken) {
+                    // Set the session manually
+                    const { data, error } = await supabase.auth.setSession({
+                        access_token: accessToken,
+                        refresh_token: refreshToken
+                    })
+
+                    if (data?.session?.user) {
+                        const { data: profile } = await supabase.from('profiles').select('*').eq('id', data.session.user.id).single()
+                        set({ user: { ...data.session.user, ...profile } })
+                        get().fetchNotes()
+                        return
+                    }
+                }
+            }
+        }
+
+        // Normal session check
         const { data: { session } } = await supabase.auth.getSession()
         if (session?.user) {
             const { data: profile } = await supabase.from('profiles').select('*').eq('id', session.user.id).single()
@@ -32,6 +59,7 @@ export const useStore = create((set, get) => ({
             get().fetchNotes()
         }
 
+        // Listen for auth changes
         supabase.auth.onAuthStateChange(async (_event, session) => {
             if (session?.user) {
                 const { data: profile } = await supabase.from('profiles').select('*').eq('id', session.user.id).single()
